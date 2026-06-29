@@ -10,6 +10,7 @@ data/
 *.npy
 *.pt
 *.mp4
+!results/**/*.mp4
 *.7z
 *.7z.*
 

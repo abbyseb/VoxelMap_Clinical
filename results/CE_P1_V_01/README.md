@@ -18,6 +18,8 @@ Heavy artifacts (checkpoints `.pt`, `ModelTraining/`, raw volumes) remain under 
 | Final train loss | 0.0623 |
 
 - Loss curves: `plots/loss_curves.png`
+- **Test sweep MP4:** `videos/CE_P1_V_01_test_sweep.mp4` (340 projections, phase labels)
+- Sweep trace (projection index): `plots/Performance_Trace_by_index.png`
 - Per-epoch history: `loss_history.json`
 - Checkpoints (local): `runs/CE_P1_V_01/checkpoints/best.pt`, `epochs/epoch_*.pt`
 
@@ -34,7 +36,8 @@ Synthetic onboard CBCT sweep (`ModelTraining/test/`, §6 NOTE_TO_AGENT).
 | neg det(J) fraction | 0.0000 | — |
 
 - Per-angle metrics: `sweep_metrics.json`
-- Trace plot: `plots/Performance_Trace.png`
+- Trace plot: `plots/Performance_Trace.png` (legacy: vs gantry angle — flat GT segments)
+- **Preferred trace:** `plots/Performance_Trace_by_index.png` (vs projection index)
 
 ## Reproduce
 
