@@ -25,6 +25,7 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 from ml.utilities import networksFiLM, spatialTransform
+from ml.volume_view import VolumeViewConfig, extract_flow_uv, extract_slice
 
 
 def _normalize(x: np.ndarray) -> np.ndarray:
@@ -119,20 +120,6 @@ def draw_quiver(rgb: np.ndarray, u: np.ndarray, v: np.ndarray, stride: int, colo
     return np.array(out)
 
 
-def extract_axial_slice(vol: np.ndarray, slice_idx: int | None = None) -> np.ndarray:
-    d = vol.shape[0]
-    idx = d // 2 if slice_idx is None else int(np.clip(slice_idx, 0, d - 1))
-    return vol[idx, :, :]
-
-
-def extract_flow_uv(flow_chw: np.ndarray, slice_idx: int) -> tuple[np.ndarray, np.ndarray]:
-    """flow (3,D,H,W) -> in-plane u,v on axial slice (SI, AP)."""
-    sl = flow_chw[:, slice_idx, :, :]  # 3,H,W
-    u = sl[1]  # SI
-    v = sl[2]  # AP
-    return u, v
-
-
 def compose_panel(
     tiles: list[tuple[str, np.ndarray]],
     header: str,
@@ -179,6 +166,7 @@ def export_dvf_warp_mp4(
     tile_px: int = 280,
     arrow_stride: int = 10,
     max_frames: int = 0,
+    view: VolumeViewConfig | None = None,
 ) -> int:
     import imageio
 
@@ -197,7 +185,9 @@ def export_dvf_warp_mp4(
     if not src_vol_path.is_file():
         src_vol_path = next((test_dir / "SourceVolumes").glob("sub_CT_*.npy"))
     src_vol_np = _normalize(np.load(src_vol_path).squeeze())
-    slice_idx = src_vol_np.shape[0] // 2
+    view_cfg = (view or VolumeViewConfig()).resolve()
+    if view_cfg.slice_index == 64 and src_vol_np.shape[0] != 128:
+        view_cfg.slice_index = src_vol_np.shape[int(view_cfg.slice_axis)] // 2
 
     # Global display ranges
     all_src_p, all_tgt_p = [], []
@@ -223,9 +213,9 @@ def export_dvf_warp_mp4(
             warped = transformer(src_vol_t, pred_flow)[0, 0].cpu().numpy()
             flow_np = pred_flow[0].cpu().numpy()  # 3,D,H,W
 
-            src_slice = extract_axial_slice(src_vol_np, slice_idx)
-            warped_slice = extract_axial_slice(_normalize(warped), slice_idx)
-            u, v = extract_flow_uv(flow_np, slice_idx)
+            src_slice = extract_slice(src_vol_np, view_cfg)
+            warped_slice = extract_slice(_normalize(warped), view_cfg)
+            u, v = extract_flow_uv(flow_np, view_cfg)
 
             src_rgb = gray_to_rgb_u8(src_slice, v_lo, v_hi)
             src_arrow_rgb = draw_quiver(src_rgb, u, v, stride=arrow_stride)
@@ -233,7 +223,10 @@ def export_dvf_warp_mp4(
             src_proj_rgb = gray_to_rgb_u8(src_p, p_lo, p_hi)
             tgt_proj_rgb = gray_to_rgb_u8(tgt_p, p_lo, p_hi)
 
-            meta = f"proj {s['proj_idx']:03d}  |  phase {s['phase']:02d}  |  angle {s['angle']:.1f}°"
+            meta = (
+                f"proj {s['proj_idx']:03d}  |  phase {s['phase']:02d}  |  angle {s['angle']:.1f}°"
+                f"  |  {view_cfg.plane} slice {view_cfg.clamp_slice(src_vol_np.shape)} ⊥ {view_cfg.slice_normal}"
+            )
             frame = compose_panel(
                 [
                     ("Source projection (06)", src_proj_rgb),
@@ -274,7 +267,26 @@ def main() -> int:
     ap.add_argument("--tile-px", type=int, default=280)
     ap.add_argument("--arrow-stride", type=int, default=10)
     ap.add_argument("--max-frames", type=int, default=0)
+    ap.add_argument("--view-config", type=Path, default=None, help="JSON from volume orientation GUI")
+    ap.add_argument("--plane", choices=("axial", "sagittal", "coronal"), default=None)
+    ap.add_argument("--slice-index", type=int, default=None)
+    ap.add_argument("--flip-h", action="store_true")
+    ap.add_argument("--flip-v", action="store_true")
     args = ap.parse_args()
+
+    view = VolumeViewConfig(scan_id=args.scan_id)
+    if args.view_config and args.view_config.is_file():
+        view = VolumeViewConfig.load_json(args.view_config)
+    if args.plane:
+        view.plane = args.plane
+        view.slice_axis = view.h_axis = view.v_axis = view.flow_u = view.flow_v = None
+    if args.slice_index is not None:
+        view.slice_index = args.slice_index
+    if args.flip_h:
+        view.flip_h = True
+    if args.flip_v:
+        view.flip_v = True
+    view.resolve()
 
     ckpt = args.checkpoint or (REPO / "runs" / args.scan_id / "checkpoints/best.pt")
     test_dir = args.test_dir or (REPO / "runs" / args.scan_id / "ModelTraining/test" / args.scan_id)
@@ -289,6 +301,7 @@ def main() -> int:
         tile_px=args.tile_px,
         arrow_stride=args.arrow_stride,
         max_frames=args.max_frames,
+        view=view,
     )
     print(f"Wrote {n} frames -> {out}")
     return 0
