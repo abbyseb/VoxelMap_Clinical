@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.pyc
+
+# Large clinical / pipeline artifacts (stay on T7)
+runs/
+data/
+*.mha
+*.bin
+*.npy
+*.pt
+*.mp4
+*.7z
+*.7z.*
+
+# macOS
+.DS_Store
+._*
+
+# Papers / local-only
+*.pdf
+
+# Secrets
+.env
+*.env
+*_token*
+*credentials*
