@@ -105,7 +105,7 @@ class VolumeViewConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> VolumeViewConfig:
-        allowed = {f.name for f in cls.__dataclass_fields__}
+        allowed = set(cls.__dataclass_fields__.keys())
         clean = {k: v for k, v in data.items() if k in allowed}
         return cls(**clean).resolve()
 
