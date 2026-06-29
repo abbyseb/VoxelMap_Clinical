@@ -267,6 +267,13 @@ VoxelMap_Clinical/
 ├── ELEKTA_DRR_VERIFICATION.md
 ├── config/
 │   └── elekta_drr.py             ← Elekta DRR detector + geometry path helper
+├── ml/utilities/                 ← vendored VoxelMap networks (from LEARN-GUI)
+│   ├── networksFiLM.py           ← concatenated + FiLM Model (primary)
+│   ├── networks.py
+│   ├── layers.py
+│   ├── modelio.py
+│   ├── losses.py
+│   └── README.md
 └── scripts/
     ├── compare_spare_geometry.py ← MC vs Elekta coordinate/geometry diff
     ├── export_drr_mp4.py         ← verification videos
