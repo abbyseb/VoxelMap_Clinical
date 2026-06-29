@@ -196,8 +196,16 @@ python scripts/export_drr_mp4.py
 
 ### Step 3 — Train (Phase 3, GPU)
 
+Uses **in-repo** `ml/trainer.py` (per-epoch checkpoints, `best.pt`, loss-curve PNGs):
+
 ```bash
-cd "$LEARN_GUI_ROOT"
+LEARN_GUI_ROOT=... VOXELMAP_CLINICAL_ROOT=... python scripts/run_elekta_phase3_train.py
+```
+
+Or directly:
+
+```bash
+cd "$VOXELMAP_CLINICAL_ROOT"
 python ml/trainer.py \
   --data_dirs "$VOXELMAP_CLINICAL_ROOT/runs/CE_P1_V_01/ModelTraining/train/CE_P1_V_01" \
   --architecture concatenated \
@@ -208,31 +216,143 @@ python ml/trainer.py \
   --val_split 0.1 \
   --device cuda \
   --num_workers 4 \
+  --checkpoint_dir "$VOXELMAP_CLINICAL_ROOT/runs/CE_P1_V_01/checkpoints" \
+  --plots_dir "$VOXELMAP_CLINICAL_ROOT/runs/CE_P1_V_01/plots" \
   --save_path "$VOXELMAP_CLINICAL_ROOT/runs/CE_P1_V_01/checkpoints/CE_P1_V_01_concat_film.pt"
 ```
 
-Or wrapper:
+### Step 4 — Evaluate
+
+**A. Held-out train pairs** (random phase targets, not the breathing sweep):
 
 ```bash
-LEARN_GUI_ROOT=... VOXELMAP_CLINICAL_ROOT=... python scripts/run_elekta_phase3_train.py
+python scripts/run_elekta_phase4_eval.py
+# → ml/evaluator.py on ModelTraining/train/… (Dice, PSNR, SSIM, centroid shift)
 ```
 
-(Update `run_elekta_phase3_train.py` to pass `--device cuda` on workstation — see §7.)
-
-### Step 4 — Evaluate (after training)
+**B. Synthetic breathing sweep** (onboard CBCT simulation — **requires §6 test split**):
 
 ```bash
 cd "$LEARN_GUI_ROOT"
 python ml/tester.py \
-  --checkpoint "$VOXELMAP_CLINICAL_ROOT/runs/CE_P1_V_01/checkpoints/CE_P1_V_01_concat_film.pt" \
-  --data_dirs "$VOXELMAP_CLINICAL_ROOT/runs/CE_P1_V_01/ModelTraining/train/CE_P1_V_01"
+  --model_path "$VOXELMAP_CLINICAL_ROOT/runs/CE_P1_V_01/checkpoints/best.pt" \
+  --data_dir "$VOXELMAP_CLINICAL_ROOT/runs/CE_P1_V_01/ModelTraining/test" \
+  --architecture concatenated --use_film --device cuda
 ```
 
 (Confirm `tester.py` CLI flags match your LEARN-GUI revision.)
 
 ---
 
-## 6. Known issues & fixes
+## 6. LEARN-GUI test dataset — synthetic breathing sweep (“sinusoidal”)
+
+**Source code:** `LEARN-GUI/LEARN-GUI-Python/modules/prep_train/run.py` (test split branch)  
+**Evaluation:** `LEARN-GUI/LEARN-GUI-Python/ml/tester.py` → `build_sweep_index()`
+
+### Why it exists
+
+**Training** uses real phase-labelled projections: at each gantry angle, source = phase **06** (exhale), target = another respiratory phase, with a matching GT DVF.
+
+**Testing / validation** simulates a **continuous onboard CBCT sweep**: as gantry angle index increases, the breathing phase cycles through the 10 respiratory bins — mimicking a patient breathing while the gantry rotates. LEARN-GUI logs call this *“Synthesizing full breath cycle (01→06→10)”*.
+
+> **Note:** The implementation is **modulo phase cycling** (`1,2,…,10,1,2,…`), not a mathematical sine wave. The name “sinusoidal” in the GUI/docs means *smooth periodic breathing over the projection sequence*.
+
+### Train vs test in `prep_train`
+
+| Split | `patient_mapping` value | Output layout |
+|-------|-------------------------|---------------|
+| **Train** | `"train"` | `SourceProjections/` = phase `06_*` only; `TargetProjections/` = all other phases (`01_`…`10_`, excluding routing) |
+| **Test** | `"test"` | Synthetic sweep + reference sources (below) |
+| **Both** | `"Train+Test"` or `"Train & Test"` | Runs train job then test job from same `train/` folder |
+
+**Current Elekta pilot (`run_elekta_phase2.py`):** only **`train`** split was built. Workstation agent should also emit **`test`** for `tester.py` evaluation.
+
+### How the test sweep is built (per projection index)
+
+For each gantry index `proj_idx` = 1 … N (N = 340 Elekta, 680 MC):
+
+```python
+phase_num = ((proj_idx - 1) % 10) + 1   # cycles 1,2,…,10,1,2,…
+bin_file  = f"{phase:02d}_Proj_{proj_idx:03d}.bin"   # from train/
+out_npy   = f"Proj_{proj_idx:05d}_bin.npy"           # sequential, no phase prefix
+```
+
+- **`TestProjections/`** — `Proj_00001_bin.npy` … `Proj_00340_bin.npy` (5-digit index), each frame from the phase selected by the formula above at that angle.
+- **`RespBin.csv`** — one row per projection; row `i` = breathing phase (1–10) used at index `i`. Required because filenames no longer encode phase.
+- **`SourceTestProjections/`** — phase **06** at every angle: `06_Proj_{idx:03d}_bin.npy` (model always sees exhale reference projection).
+- **`SourceProjections/`** — also populated with `06_*` (same reference set).
+- **`TargetProjections/`** — all phase-prefixed bins (for debugging / legacy).
+- **`Test_Breathing_Sweep.mp4`** — preview video of `TestProjections/` sequence.
+
+### ModelTraining/test folder layout
+
+```text
+ModelTraining/test/CE_P1_V_01/
+├── SourceProjections/       # 06_Proj_XXX_bin.npy
+├── SourceTestProjections/   # 06_Proj_XXX_bin.npy (tester prefers this)
+├── TestProjections/         # Proj_00001_bin.npy … Proj_00340_bin.npy  ← sweep
+├── TargetProjections/       # all phase-labelled bins
+├── SourceVolumes/           # sub_CT_06_mha.npy (+ others)
+├── DVFs/                    # DVF_01_mha.npy … DVF_10_mha.npy
+├── Masks/
+├── Angles.csv               # gantry angle per projection index
+└── RespBin.csv              # breathing phase per projection index (sweep map)
+```
+
+### How `tester.py` uses the sweep
+
+For each sweep sample (one gantry angle):
+
+1. `source_proj` ← `SourceTestProjections/06_Proj_{idx:03d}_bin.npy`
+2. `target_proj` ← `TestProjections/Proj_{idx:05d}_bin.npy`
+3. `phase` ← `RespBin.csv[idx-1]` (or parsed from legacy filename)
+4. `gt_dvf` ← `DVFs/DVF_{phase:02d}_mha.npy`
+5. `angle` ← `Angles.csv[idx-1]` (FiLM conditioning)
+
+Model predicts DVF → warp PTV → Dice, centroid shift, PSNR, etc. vs GT DVF.
+
+### Agent: build test split for Elekta
+
+After Phase 2 train prep, call `prep_train` with **test** (or extend `run_elekta_phase2.py`):
+
+```python
+from modules.prep_train.run import run_prep_train
+
+run_prep_train(
+    run_folder_path=Path("runs/CE_P1_V_01"),
+    patient_mapping={"CE_P1_V_01": "test"},   # or "Train+Test" to do both
+    dataset_type="spare",
+    angles_xml_path=Path("runs/CE_P1_V_01/CE_P1_V_01/train/Proj/Geometry.xml"),
+    prefer_patient_xml=False,
+)
+```
+
+Requires the same `CE_P1_V_01/train/` tree with all `{phase}_Proj_{###}.bin` files (from DRR step).
+
+Then validate:
+
+```bash
+cd "$LEARN_GUI_ROOT"
+python ml/tester.py \
+  --model_path "$VOXELMAP_CLINICAL_ROOT/runs/CE_P1_V_01/checkpoints/CE_P1_V_01_concat_film.pt" \
+  --data_dir "$VOXELMAP_CLINICAL_ROOT/runs/CE_P1_V_01/ModelTraining/test" \
+  --architecture concatenated --use_film --device cuda
+```
+
+Optional GUI: **DVF Visualisation** dialog (`gui/ui/dvf_visualisation_dialog.py`) uses the same `build_sweep_index()` to scrub through the sweep and export MP4.
+
+### Phase diagram (conceptual)
+
+```
+Gantry index:  1    2    3   …   10   11   12  …   340
+Resp phase:    1    2    3   …   10    1    2  …    10   (modulo cycle)
+Source (fixed): 06   06   06  …   06   06   06  …   06   (exhale ref)
+Target (sweep): 01   02   03  …   10   01   02  …   10   (from TestProjections/)
+```
+
+---
+
+## 7. Known issues & fixes
 
 | Issue | Fix |
 |-------|-----|
@@ -245,20 +365,21 @@ python ml/tester.py \
 
 ---
 
-## 7. Suggested agent improvements (not yet implemented)
+## 8. Suggested agent improvements (not yet implemented)
 
 Priority for workstation agent:
 
-1. **`run_elekta_phase3_train.py`** — add `--device cuda` (auto-detect CUDA, fail clearly if missing).
-2. **`run_elekta_phase2.py`** — read `LEARN_GUI_ROOT` from env (partially done).
-3. **`scripts/stage_elekta_scan.py`** — parameterized selective 7z extract + merge using `$SPARE_PUBLIC_ARCHIVE`.
-4. **Per-epoch checkpoints** in `trainer.py` (currently only `--save_path` at end).
-5. **Multi-scan training** — `--data_dirs` for `CE_P1_V_01` + `CE_P1_V_02` etc.
-6. **Other Elekta patients** — `CE_P2`…`CE_P5` (same pipeline, new `--scan-id`).
+1. **`run_elekta_phase2.py`** — read `LEARN_GUI_ROOT` from env (partially done); add `--split train|test|both` for §6 sinusoidal test sweep.
+2. **`scripts/stage_elekta_scan.py`** — parameterized selective 7z extract + merge using `$SPARE_PUBLIC_ARCHIVE`.
+3. **Multi-scan training** — `--data_dirs` for `CE_P1_V_01` + `CE_P1_V_02` etc.
+4. **Other Elekta patients** — `CE_P2`…`CE_P5` (same pipeline, new `--scan-id`).
+5. **`ml/evaluator.py` sweep mode** — optional: port `build_sweep_index()` from LEARN-GUI `tester.py` so phase 4 can run on `ModelTraining/test/` without external LEARN-GUI.
+
+**Done in repo (605bcdd):** local `ml/trainer.py` (per-epoch + `best.pt`), `ml/evaluator.py`, `run_elekta_phase3_train.py` CUDA auto-detect, `run_elekta_phase4_eval.py`.
 
 ---
 
-## 8. File map (this repo)
+## 9. File map (this repo)
 
 ```
 VoxelMap_Clinical/
@@ -267,42 +388,44 @@ VoxelMap_Clinical/
 ├── ELEKTA_DRR_VERIFICATION.md
 ├── config/
 │   └── elekta_drr.py             ← Elekta DRR detector + geometry path helper
-├── ml/utilities/                 ← vendored VoxelMap networks (from LEARN-GUI)
-│   ├── networksFiLM.py           ← concatenated + FiLM Model (primary)
-│   ├── networks.py
-│   ├── layers.py
-│   ├── modelio.py
-│   ├── losses.py
-│   └── README.md
+├── ml/
+│   ├── trainer.py                  ← GPU training (per-epoch ckpt, best.pt, plots)
+│   ├── evaluator.py              ← eval on train split pairs
+│   ├── dynamic_dataset.py
+│   ├── training_config.py
+│   └── utilities/                 ← vendored VoxelMap networks (from LEARN-GUI)
+│       ├── networksFiLM.py       ← concatenated + FiLM Model (primary)
+│       ├── networks.py
+│       ├── layers.py
+│       ├── modelio.py
+│       ├── losses.py
+│       └── README.md
 └── scripts/
     ├── compare_spare_geometry.py ← MC vs Elekta coordinate/geometry diff
     ├── export_drr_mp4.py         ← verification videos
-    ├── run_elekta_phase2.py      ← preprocess → ModelTraining
-    └── run_elekta_phase3_train.py← training wrapper (point at CUDA on workstation)
+    ├── run_elekta_phase2.py      ← preprocess → ModelTraining (train only today)
+    ├── run_elekta_phase3_train.py← training wrapper
+    └── run_elekta_phase4_eval.py ← eval on train split (sweep: §6 + LEARN-GUI tester.py)
 ```
 
-**External dependency:** `LEARN-GUI/LEARN-GUI-Python` — `ml/trainer.py`, `ml/dynamic_dataset.py`, preprocessing modules.
-
-**Patches already applied on T7 LEARN-GUI (may need re-applying on workstation clone):**
-
-- `ml/trainer.py` — `--save_path`, `--num_workers` (default 0)
-- `ml/dynamic_dataset.py` — skip `._*` files
+**External dependency:** `LEARN-GUI/LEARN-GUI-Python` — preprocessing modules (`prep_train`, DRR, DVF) and **`ml/tester.py`** for sinusoidal sweep eval (§6).
 
 ---
 
-## 9. Success criteria
+## 10. Success criteria
 
 Agent is done when:
 
 1. [ ] `ModelTraining/train/CE_P1_V_01/` exists with 3060+ samples, 340 angles
-2. [ ] DRR MP4 shows reasonable acquired vs simulated alignment
-3. [ ] Training completes 50 epochs on **CUDA** without error
-4. [ ] Checkpoint saved under `runs/CE_P1_V_01/checkpoints/`
-5. [ ] `tester.py` metrics logged (Dice / centroid shift)
+2. [ ] `ModelTraining/test/CE_P1_V_01/` exists with sweep (`TestProjections/`, `RespBin.csv`) — §6
+3. [ ] DRR MP4 shows reasonable acquired vs simulated alignment
+4. [ ] Training completes 50 epochs on **CUDA** without error
+5. [ ] Checkpoint saved under `runs/CE_P1_V_01/checkpoints/`
+6. [ ] `tester.py` metrics logged (Dice / centroid shift on breathing sweep)
 
 ---
 
-## 10. Quick decision tree
+## 11. Quick decision tree
 
 ```
 Have rsync'd ModelTraining from T7?
@@ -314,4 +437,4 @@ Have rsync'd ModelTraining from T7?
 
 ---
 
-*Last updated: 2026-06-29 — pilot scan `CE_P1_V_01`, Mac preprocessing complete, training pending on CUDA workstation.*
+*Last updated: 2026-06-29 — pulled 605bcdd (local trainer/evaluator); §6 sinusoidal test sweep documented; training pending on CUDA workstation.*
