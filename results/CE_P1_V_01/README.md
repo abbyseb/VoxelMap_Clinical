@@ -19,6 +19,7 @@ Heavy artifacts (checkpoints `.pt`, `ModelTraining/`, raw volumes) remain under 
 
 - Loss curves: `plots/loss_curves.png`
 - **Test sweep MP4:** `videos/CE_P1_V_01_test_sweep.mp4` (340 projections, phase labels)
+- **DVF warp panel MP4:** `videos/CE_P1_V_01_dvf_warp_panels.mp4` (2×2: source/target proj, source+arrows, warped)
 - Sweep trace (projection index): `plots/Performance_Trace_by_index.png`
 - Per-epoch history: `loss_history.json`
 - Checkpoints (local): `runs/CE_P1_V_01/checkpoints/best.pt`, `epochs/epoch_*.pt`

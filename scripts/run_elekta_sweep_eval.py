@@ -64,10 +64,11 @@ def main() -> int:
     with log.open(encoding="utf-8") as fh:
         print(fh.read()[-4000:])
 
-    # Post-process: test sweep MP4 + trace plot vs projection index
+    # Post-process: test sweep MP4 + trace plot vs projection index + DVF warp panel video
     post = [
         [str(python), str(REPO / "scripts/export_test_sweep_mp4.py")],
         [str(python), str(REPO / "scripts/regenerate_sweep_trace.py")],
+        [str(python), str(REPO / "scripts/export_dvf_warp_mp4.py")],
     ]
     for cmd in post:
         subprocess.run(cmd, cwd=str(REPO), env=env, check=True)
