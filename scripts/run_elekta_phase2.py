@@ -166,7 +166,7 @@ def main() -> int:
 
     t0 = time.perf_counter()
     spare_run = _load_spare_d2m()
-    spare_run(train, train)
+    spare_run(staged, train)
 
     logging.info("=== DOWNSAMPLE ===")
     n_sub = run_downsample(train)
