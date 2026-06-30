@@ -20,8 +20,14 @@ sys.path.insert(0, str(REPO / "config"))
 
 from elekta_drr import elekta_drr_opts_for_scan  # noqa: E402
 
-SCAN_ID = "CE_P1_V_01"
-DEFAULT_RUN = REPO / "runs" / SCAN_ID
+DEFAULT_SCAN = os.environ.get("SPARE_SCAN_ID", "CE_P1_V_01")
+
+
+def _patient_num(scan_id: str) -> str:
+    m = re.match(r"CE_P(\d+)_", scan_id)
+    if not m:
+        raise ValueError(f"Cannot parse patient from scan id: {scan_id}")
+    return m.group(1)
 
 
 def _load_spare_d2m():
@@ -33,17 +39,16 @@ def _load_spare_d2m():
     return mod.run
 
 
-def ensure_layout(run_root: Path, staged: Path) -> Path:
+def ensure_layout(run_root: Path, staged: Path, scan_id: str) -> Path:
     """prep_train expects run_root/<scan_id>/train/."""
-    train = run_root / SCAN_ID / "train"
+    train = run_root / scan_id / "train"
     flat_train = run_root / "train"
     if flat_train.is_dir() and not train.is_dir():
         train.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(flat_train), str(train))
-        logging.info("Moved train/ → %s/train/", SCAN_ID)
+        logging.info("Moved train/ → %s/train/", scan_id)
     train.mkdir(parents=True, exist_ok=True)
 
-    # Masks + Proj geometry from staged if missing
     for pat in ("Mask_*.mha",):
         for src in staged.glob(pat):
             dst = train / src.name
@@ -123,15 +128,16 @@ def run_dvf(train: Path) -> int:
     return done
 
 
-def run_prep(run_root: Path, train: Path, geom_xml: Path) -> None:
+def run_prep(run_root: Path, scan_id: str, geom_xml: Path, *, with_test: bool) -> None:
     from modules.prep_train.run import run_prep_train
 
     def log(msg):
         logging.info(msg)
 
+    split = "Train+Test" if with_test else "train"
     run_prep_train(
         run_root,
-        {SCAN_ID: "train"},
+        {scan_id: split},
         dataset_type="spare",
         on_log=log,
         angles_xml_path=geom_xml,
@@ -141,15 +147,18 @@ def run_prep(run_root: Path, train: Path, geom_xml: Path) -> None:
 
 def main() -> int:
     p = argparse.ArgumentParser(description="Elekta SPARE phase 2 pipeline")
-    p.add_argument("--run-root", type=Path, default=DEFAULT_RUN)
-    p.add_argument(
-        "--staged",
-        type=Path,
-        default=REPO / "data/staged/P1/CE_P1_V_01",
-    )
+    p.add_argument("--scan-id", default=DEFAULT_SCAN)
+    p.add_argument("--run-root", type=Path, default=None)
+    p.add_argument("--staged", type=Path, default=None)
+    p.add_argument("--with-test", action="store_true", help="Also build ModelTraining/test sweep")
     p.add_argument("--skip-drr", action="store_true", help="Resume after DRR")
     p.add_argument("--skip-dvf", action="store_true", help="Resume after DVF")
     args = p.parse_args()
+
+    scan_id = args.scan_id
+    pnum = _patient_num(scan_id)
+    run_root = (args.run_root or REPO / "runs" / scan_id).resolve()
+    staged = (args.staged or REPO / "data/staged" / f"P{pnum}" / scan_id).resolve()
 
     logging.basicConfig(
         level=logging.INFO,
@@ -157,9 +166,7 @@ def main() -> int:
         datefmt="%H:%M:%S",
     )
 
-    run_root = args.run_root.resolve()
-    staged = args.staged.resolve()
-    train = ensure_layout(run_root, staged)
+    train = ensure_layout(run_root, staged, scan_id)
     geom_xml = train / "Proj" / "Geometry.xml"
     if not geom_xml.is_file():
         raise FileNotFoundError(geom_xml)
@@ -184,10 +191,10 @@ def main() -> int:
         logging.info("=== DVF3D_LOW ===")
         run_dvf(train)
 
-    logging.info("=== PREP_TRAIN ===")
-    run_prep(run_root, train, geom_xml)
+    logging.info("=== PREP_TRAIN (%s) ===", "Train+Test" if args.with_test else "train")
+    run_prep(run_root, scan_id, geom_xml, with_test=args.with_test)
 
-    mt = run_root / "ModelTraining" / "train" / SCAN_ID
+    mt = run_root / "ModelTraining" / "train" / scan_id
     logging.info("Done in %.1f min", (time.perf_counter() - t0) / 60)
     logging.info("ModelTraining: %s", mt)
     if mt.is_dir():
@@ -196,6 +203,10 @@ def main() -> int:
             if pth.exists():
                 n = len(list(pth.glob("*"))) if pth.is_dir() else 1
                 logging.info("  %s: %s", sub, n)
+    if args.with_test:
+        test = run_root / "ModelTraining" / "test" / scan_id / "TestProjections"
+        if test.is_dir():
+            logging.info("  TestProjections: %d", len(list(test.glob("*.npy"))))
     return 0
 
 

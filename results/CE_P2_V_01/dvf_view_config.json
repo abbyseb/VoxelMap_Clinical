@@ -1,0 +1,15 @@
+{
+  "scan_id": "CE_P2_V_01",
+  "volume_relpath": "SourceVolumes/sub_CT_06_mha.npy",
+  "plane": "sagittal",
+  "slice_index": 78,
+  "flip_h": false,
+  "flip_v": false,
+  "frame": "RAI",
+  "coordinate_system": "IEC 61217",
+  "slice_axis": 2,
+  "h_axis": 0,
+  "v_axis": 1,
+  "flow_u": 0,
+  "flow_v": 1
+}
