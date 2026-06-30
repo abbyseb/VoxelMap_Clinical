@@ -2,7 +2,7 @@
   "scan_id": "CE_P3_V_01",
   "volume_relpath": "SourceVolumes/sub_CT_06_mha.npy",
   "plane": "sagittal",
-  "slice_index": 43,
+  "slice_index": 63,
   "flip_h": false,
   "flip_v": false,
   "frame": "RAI",

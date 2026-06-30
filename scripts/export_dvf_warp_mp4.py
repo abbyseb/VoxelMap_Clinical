@@ -157,6 +157,52 @@ def compose_panel(
     return np.array(canvas)
 
 
+def mask_outline_2d(mask_slice: np.ndarray, threshold: float = 0.5, width: int = 2) -> np.ndarray:
+    """Binary outline of mask (HxW bool)."""
+    m = mask_slice > threshold
+    if not m.any():
+        return np.zeros_like(m, dtype=bool)
+    eroded = m.copy()
+    for _ in range(width):
+        e = eroded.copy()
+        e[1:, :] &= eroded[:-1, :]
+        e[:-1, :] &= eroded[1:, :]
+        e[:, 1:] &= eroded[:, :-1]
+        e[:, :-1] &= eroded[:, 1:]
+        eroded = e
+    return m & ~eroded
+
+
+def overlay_ptv_outline_rgb(
+    rgb: np.ndarray,
+    mask_slice: np.ndarray,
+    threshold: float = 0.5,
+    outline_color: tuple[int, int, int] = (0, 210, 0),
+    outline_width: int = 2,
+) -> np.ndarray:
+    """Full warped volume with green PTV contour overlay."""
+    out = rgb.copy()
+    outline = mask_outline_2d(mask_slice, threshold=threshold, width=outline_width)
+    out[outline] = outline_color
+    return out
+
+
+def load_ptv_mask(test_dir: Path) -> tuple[np.ndarray, Path] | None:
+    masks_dir = test_dir / "Masks"
+    if not masks_dir.is_dir():
+        return None
+    path = masks_dir / "Mask_PTV_mha.npy"
+    if not path.is_file():
+        found = next(masks_dir.glob("*PTV*_mha.npy"), None)
+        if found is None:
+            return None
+        path = found
+    mask = np.load(path).astype(np.float32).squeeze()
+    while mask.ndim > 3:
+        mask = mask.squeeze(0)
+    return (mask > 0).astype(np.float32), path
+
+
 def export_dvf_warp_mp4(
     checkpoint: Path,
     test_dir: Path,
@@ -167,6 +213,7 @@ def export_dvf_warp_mp4(
     arrow_stride: int = 10,
     max_frames: int = 0,
     view: VolumeViewConfig | None = None,
+    ptv_mask: bool = False,
 ) -> int:
     import imageio
 
@@ -189,6 +236,15 @@ def export_dvf_warp_mp4(
     if view_cfg.slice_index == 64 and src_vol_np.shape[0] != 128:
         view_cfg.slice_index = src_vol_np.shape[int(view_cfg.slice_axis)] // 2
 
+    ptv_loaded = load_ptv_mask(test_dir) if ptv_mask else None
+    src_ptv_np = None
+    if ptv_loaded is not None:
+        src_ptv_np, ptv_path = ptv_loaded
+    elif ptv_mask:
+        raise FileNotFoundError(f"PTV mask not found under {test_dir / 'Masks'}")
+    if src_ptv_np is not None:
+        print(f"PTV mask: {ptv_path} (voxels={int(src_ptv_np.sum())})")
+
     # Global display ranges
     all_src_p, all_tgt_p = [], []
     for s in samples[: min(32, len(samples))]:
@@ -201,6 +257,9 @@ def export_dvf_warp_mp4(
     frames = []
     with torch.no_grad():
         src_vol_t = torch.from_numpy(src_vol_np[None, None]).float().to(dev)
+        src_ptv_t = None
+        if src_ptv_np is not None:
+            src_ptv_t = torch.from_numpy(src_ptv_np[None, None]).float().to(dev)
         for s in tqdm(samples, desc="DVF warp MP4"):
             src_p = _normalize(np.load(s["source_proj"]))
             tgt_p = _normalize(np.load(s["target_proj"]))
@@ -220,6 +279,12 @@ def export_dvf_warp_mp4(
             src_rgb = gray_to_rgb_u8(src_slice, v_lo, v_hi)
             src_arrow_rgb = draw_quiver(src_rgb, u, v, stride=arrow_stride)
             warped_rgb = gray_to_rgb_u8(warped_slice, v_lo, v_hi)
+            warped_label = "Warped volume"
+            if src_ptv_t is not None:
+                warped_ptv = transformer(src_ptv_t, pred_flow)[0, 0].cpu().numpy()
+                ptv_slice = extract_slice(warped_ptv, view_cfg)
+                warped_rgb = overlay_ptv_outline_rgb(warped_rgb, ptv_slice)
+                warped_label = "Warped volume + PTV outline"
             src_proj_rgb = gray_to_rgb_u8(src_p, p_lo, p_hi)
             tgt_proj_rgb = gray_to_rgb_u8(tgt_p, p_lo, p_hi)
 
@@ -232,7 +297,7 @@ def export_dvf_warp_mp4(
                     ("Source projection (06)", src_proj_rgb),
                     ("Target projection", tgt_proj_rgb),
                     ("Source volume + DVF arrows", src_arrow_rgb),
-                    ("Warped volume", warped_rgb),
+                    (warped_label, warped_rgb),
                 ],
                 header=meta,
                 tile_px=tile_px,
@@ -272,6 +337,11 @@ def main() -> int:
     ap.add_argument("--slice-index", type=int, default=None)
     ap.add_argument("--flip-h", action="store_true")
     ap.add_argument("--flip-v", action="store_true")
+    ap.add_argument(
+        "--ptv-mask",
+        action="store_true",
+        help="Overlay warped PTV outline on warped volume panel (Mask_PTV_mha.npy)",
+    )
     args = ap.parse_args()
 
     view = VolumeViewConfig(scan_id=args.scan_id)
@@ -302,6 +372,7 @@ def main() -> int:
         arrow_stride=args.arrow_stride,
         max_frames=args.max_frames,
         view=view,
+        ptv_mask=args.ptv_mask,
     )
     print(f"Wrote {n} frames -> {out}")
     return 0
