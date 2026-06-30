@@ -35,13 +35,24 @@ def _normalize(vol: np.ndarray) -> np.ndarray:
 
 
 class VolumeOrientationViewer(tk.Tk):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        scan_id: str | None = None,
+        view_config: Path | None = None,
+    ) -> None:
         super().__init__()
         self.title("VoxelMap — Source Volume Orientation Viewer")
         self.geometry("1100x780")
 
         self.repo = REPO
-        self.cfg = VolumeViewConfig().resolve()
+        if view_config and view_config.is_file():
+            self.cfg = VolumeViewConfig.load_json(view_config)
+        else:
+            self.cfg = VolumeViewConfig(scan_id=scan_id or "CE_P1_V_01").resolve()
+        if scan_id:
+            self.cfg.scan_id = scan_id
+            self.cfg.resolve()
         self.volume_path: Path | None = None
         self.volume: np.ndarray | None = None
         self.v_lo = 0.0
@@ -56,6 +67,10 @@ class VolumeOrientationViewer(tk.Tk):
 
         ttk.Label(top, text="Scan ID:").grid(row=0, column=0, sticky=tk.W, padx=(0, 4))
         self.scan_var = tk.StringVar(value=self.cfg.scan_id)
+        self.plane_var = tk.StringVar(value=self.cfg.plane)
+        self.slice_var = tk.IntVar(value=self.cfg.slice_index)
+        self.flip_h_var = tk.BooleanVar(value=self.cfg.flip_h)
+        self.flip_v_var = tk.BooleanVar(value=self.cfg.flip_v)
         ttk.Entry(top, textvariable=self.scan_var, width=16).grid(row=0, column=1, sticky=tk.W)
 
         ttk.Button(top, text="Browse volume…", command=self._browse_volume).grid(row=0, column=2, padx=8)
@@ -66,7 +81,6 @@ class VolumeOrientationViewer(tk.Tk):
         ctrl.pack(side=tk.TOP, fill=tk.X, padx=8, pady=4)
 
         ttk.Label(ctrl, text="Plane:").grid(row=0, column=0, sticky=tk.W)
-        self.plane_var = tk.StringVar(value=self.cfg.plane)
         plane_cb = ttk.Combobox(
             ctrl,
             textvariable=self.plane_var,
@@ -78,7 +92,6 @@ class VolumeOrientationViewer(tk.Tk):
         plane_cb.bind("<<ComboboxSelected>>", lambda _e: self._on_plane_change())
 
         ttk.Label(ctrl, text="Slice:").grid(row=0, column=2, padx=(16, 4))
-        self.slice_var = tk.IntVar(value=self.cfg.slice_index)
         self.slice_scale = ttk.Scale(
             ctrl,
             from_=0,
@@ -89,11 +102,9 @@ class VolumeOrientationViewer(tk.Tk):
             length=320,
         )
         self.slice_scale.grid(row=0, column=3, sticky=tk.W)
-        self.slice_num = ttk.Label(ctrl, text="64")
+        self.slice_num = ttk.Label(ctrl, text=str(self.cfg.slice_index))
         self.slice_num.grid(row=0, column=4, padx=4)
 
-        self.flip_h_var = tk.BooleanVar(value=False)
-        self.flip_v_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(ctrl, text="Flip horizontal", variable=self.flip_h_var, command=self._refresh).grid(
             row=1, column=0, columnspan=2, sticky=tk.W, pady=4
         )
@@ -147,9 +158,14 @@ class VolumeOrientationViewer(tk.Tk):
         self.cfg.resolve()
 
     def _try_load_default(self) -> None:
+        self.scan_var.set(self.cfg.scan_id)
+        self.plane_var.set(self.cfg.plane)
+        self.slice_var.set(self.cfg.slice_index)
+        self.flip_h_var.set(self.cfg.flip_h)
+        self.flip_v_var.set(self.cfg.flip_v)
         try:
             path = default_volume_path(self.repo, self.cfg.scan_id, self.cfg.volume_relpath)
-            self._load_volume(path)
+            self._load_volume(path, keep_slice=True)
         except FileNotFoundError:
             self.path_label.config(text="No default volume — use Browse")
             self._update_info()
@@ -163,7 +179,7 @@ class VolumeOrientationViewer(tk.Tk):
         if path:
             self._load_volume(Path(path))
 
-    def _load_volume(self, path: Path) -> None:
+    def _load_volume(self, path: Path, *, keep_slice: bool = False) -> None:
         if path.suffix == ".npy":
             vol = np.load(path).astype(np.float32).squeeze()
         else:
@@ -180,11 +196,17 @@ class VolumeOrientationViewer(tk.Tk):
         self.volume_path = path
         self.volume = _normalize(vol)
         self.v_lo, self.v_hi = np.percentile(self.volume, [1, 99])
-        n = self.volume.shape[int(PLANE_PRESETS[self.plane_var.get()]["slice_axis"])]
+        self._sync_cfg_from_ui()
+        n = self.volume.shape[int(self.cfg.slice_axis)]
         self.slice_scale.config(to=max(0, n - 1))
-        mid = n // 2
-        self.slice_var.set(mid)
-        self.cfg.slice_index = mid
+        if not keep_slice:
+            mid = n // 2
+            self.slice_var.set(mid)
+            self.cfg.slice_index = mid
+        else:
+            self.slice_var.set(self.cfg.clamp_slice(self.volume.shape))
+            self.cfg.slice_index = int(self.slice_var.get())
+        self.slice_num.config(text=str(int(self.slice_var.get())))
         short = str(path)
         if len(short) > 70:
             short = "…" + short[-67:]
@@ -273,7 +295,20 @@ class VolumeOrientationViewer(tk.Tk):
 
 
 def main() -> int:
-    app = VolumeOrientationViewer()
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Source volume orientation viewer")
+    ap.add_argument("--scan-id", default=os.environ.get("SPARE_SCAN_ID", "CE_P1_V_01"))
+    ap.add_argument("--view-config", type=Path, default=None, help="Load plane/slice/flips from JSON")
+    args = ap.parse_args()
+
+    view_config = args.view_config
+    if view_config is None:
+        default_cfg = REPO / "results" / args.scan_id / "dvf_view_config.json"
+        if default_cfg.is_file():
+            view_config = default_cfg
+
+    app = VolumeOrientationViewer(scan_id=args.scan_id, view_config=view_config)
     app.mainloop()
     return 0
 
