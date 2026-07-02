@@ -72,6 +72,41 @@ CE_P{n}_V_01/
 └── Mask_Body.mha, Mask_Lung.mha, Mask_PTV.mha, Mask_Rib.mha, …
 ```
 
+### 1.4 File provenance — which files come from where
+
+SPARE splits **imaging data** and **anatomical ground truth** across two archive families. Both must be extracted (or symlinked) for preprocessing.
+
+| File / folder | In `ClinicalElektaDatasets.7z` (Participant)? | In `SPARE_GroundTruth.7z` (Evaluation)? | Extracted path on disk |
+|---------------|-----------------------------------------------|----------------------------------------|-------------------------|
+| `Proj/Geometry.xml` | **Yes** | No | `Participant_Datasets/ClinicalElektaDatasets/P{n}/{scan}/Proj/` |
+| `Proj/Proj_*.bin` (acquired onboard CBCT) | **Yes** | No | same `Proj/` folder |
+| `Proj/RespBin.csv`, `RespPhase.csv` | **Yes** | No | same `Proj/` folder |
+| `FDKRecon/FDK4D_*.mha` (FDK recon volumes) | **Yes** | No | `Participant_Datasets/…/{scan}/FDKRecon/` |
+| `GTVol_01.mha` … `GTVol_10.mha` (4D-CT GT) | **No** | **Yes** | `Evaluation/ClinicalElektaDatasets/P{n}/{scan}/` |
+| `Mask_Body.mha` | **No** | **Yes** | `Evaluation/…/{scan}/` |
+| `Mask_Lung.mha` | **No** | **Yes** | `Evaluation/…/{scan}/` |
+| `Mask_PTV.mha` | **No** | **Yes** | `Evaluation/…/{scan}/` |
+| `Mask_Rib.mha` | **No** | **Yes** | `Evaluation/…/{scan}/` |
+| `Mask_CNR.mha` | **No** | **Yes** | `Evaluation/…/{scan}/` |
+| `CNR_GroundTruth.mat`, `LinePoints_ERW.mat` | **No** | **Yes** | `Evaluation/…/{scan}/` (analysis metadata; not used in pipeline) |
+
+**What `stage_elekta_scan.py` symlinks:**
+
+| Staged file | Symlink target |
+|-------------|----------------|
+| `Proj/` | `Participant_Datasets/ClinicalElektaDatasets/P{n}/{scan_id}/Proj/` |
+| `GTVol_*.mha` | `Evaluation/ClinicalElektaDatasets/P{n}/{scan_id}/GTVol_*.mha` |
+| `Mask_*.mha` | `Evaluation/ClinicalElektaDatasets/P{n}/{scan_id}/Mask_*.mha` |
+
+**Not copied by staging** (remain only under Participant if needed for QC): `FDKRecon/`. Optional reference for DRR verification; not required for VoxelMap training.
+
+**After preprocessing**, masks appear again as downsampled NumPy arrays:
+
+| Output | Produced from |
+|--------|----------------|
+| `train/Mask_*.mha` | Copied from staged `Mask_*.mha` during phase 2 |
+| `ModelTraining/.../Masks/*_mha.npy` | `prep_train` resamples masks to 128³ |
+
 ---
 
 ## 2. What we found inside the Elekta data
