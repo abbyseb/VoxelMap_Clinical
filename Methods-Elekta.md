@@ -81,8 +81,9 @@ SPARE splits **imaging data** and **anatomical ground truth** across two archive
 | `Proj/Geometry.xml` | **Yes** | No | `Participant_Datasets/ClinicalElektaDatasets/P{n}/{scan}/Proj/` |
 | `Proj/Proj_*.bin` (acquired onboard CBCT) | **Yes** | No | same `Proj/` folder |
 | `Proj/RespBin.csv`, `RespPhase.csv` | **Yes** | No | same `Proj/` folder |
-| `FDKRecon/FDK4D_*.mha` (FDK recon volumes) | **Yes** | No | `Participant_Datasets/…/{scan}/FDKRecon/` |
-| `GTVol_01.mha` … `GTVol_10.mha` (4D-CT GT) | **No** | **Yes** | `Evaluation/ClinicalElektaDatasets/P{n}/{scan}/` |
+| `FDKRecon/FDK4D_*.mha`, `FDK3D.mha` | **Yes** | No | `Participant_Datasets/…/{scan}/FDKRecon/` — FDK from **downsampled** 1-min projections (QC only) |
+| `FDKGroundTruth/FDK4D_*.mha` | **Yes** ( **`T_01` training scans only** ) | No | `Participant_Datasets/…/{scan}/FDKGroundTruth/` — byte-identical to Evaluation `GTVol_*` on training scans |
+| `GTVol_01.mha` … `GTVol_10.mha` (reference 4D GT) | **No** | **Yes** | `Evaluation/ClinicalElektaDatasets/P{n}/{scan}/` — FDK per respiratory bin from **oversampled** projections |
 | `Mask_Body.mha` | **No** | **Yes** | `Evaluation/…/{scan}/` |
 | `Mask_Lung.mha` | **No** | **Yes** | `Evaluation/…/{scan}/` |
 | `Mask_PTV.mha` | **No** | **Yes** | `Evaluation/…/{scan}/` |
@@ -98,7 +99,7 @@ SPARE splits **imaging data** and **anatomical ground truth** across two archive
 | `GTVol_*.mha` | `Evaluation/ClinicalElektaDatasets/P{n}/{scan_id}/GTVol_*.mha` |
 | `Mask_*.mha` | `Evaluation/ClinicalElektaDatasets/P{n}/{scan_id}/Mask_*.mha` |
 
-**Not copied by staging** (remain only under Participant if needed for QC): `FDKRecon/`. Optional reference for DRR verification; not required for VoxelMap training.
+**Not copied by staging** (remain only under Participant if needed for QC): `FDKRecon/`, `FDKGroundTruth/`. These are optional FDK references for visual comparison; **not** used by VoxelMap training (see §2.3).
 
 **After preprocessing**, masks appear again as downsampled NumPy arrays:
 
@@ -138,9 +139,25 @@ Verified on `CE_P1_V_01` (`ELEKTA_DRR_VERIFICATION.md`, `scripts/compare_spare_g
 
 **Important:** Use each scan’s own `Proj/Geometry.xml`. Do **not** use `Geometry_SPARE.xml` from the Monte Carlo / Varian gold batch (half-fan, 1024×768).
 
-### 2.3 Ground truth
+### 2.3 Ground truth — FDK, `GTVol`, and what this pipeline uses
 
-Unlike Monte Carlo SPARE data, Clinical Elekta has **no simulated 4D-CT**. Ground-truth volumes (`GTVol_*.mha`) are derived from a **full-scan FDK reference**; inter-phase **DVFs** are obtained by **non-rigid registration** (Elastix) of each phase to the reference phase 06. Intensities are **not HU-calibrated** (SPARE clinical convention).
+Unlike Monte Carlo SPARE data, Clinical Elekta has **no simulated 4D-CT**. SPARE builds reference volumes from a **long oversampled CBCT acquisition** (~1000 projections over ~3 min), then:
+
+1. Sorts projections into **10 respiratory bins** (`RespBin.csv`; reference phase **06** = max exhale).
+2. Runs **FDK reconstruction per bin** → one 3D volume per phase.
+
+Those reference volumes are released as **`GTVol_01.mha` … `GTVol_10.mha`** in the Evaluation archive. This is **respiratory-binned 4D FDK** (ten separate reconstructions), **not** a single 3D volume “broken into” ten parts.
+
+| Volume | Source projections | In our pipeline? |
+|--------|---------------------|------------------|
+| **`GTVol_XX.mha`** (Evaluation) | **Oversampled / full** scan (~1000 proj) | **Yes** — staged, downsampled to `sub_CT_*.mha`, used for DRR + eval |
+| **`FDKGroundTruth/FDK4D_XX.mha`** (Participant, **`T_01` only**) | Same as `GTVol_*` | No — identical to Evaluation `GTVol_*` on training scans (verified on `CE_P1_T_01`) |
+| **`FDKRecon/FDK4D_XX.mha`** (Participant, all scans) | **Downsampled** 1-min scan (340 proj) | No — QC only; **different voxels** from `GTVol_*` on validation scans |
+| **`FDKRecon/FDK3D.mha`** (Participant) | Separate static 3D FDK | No — not the parent of the ten phase volumes |
+
+**This repo does not run FDK.** We consume pre-built `GTVol_*` from Evaluation, generate **synthetic DRRs** from downsampled CTs (ITK-RTK), and compute **training DVFs** with **ITK-Elastix** (phase 06 fixed → other phases). That registration step is **our** preprocessing supervision — it is not how SPARE created `GTVol_*`.
+
+Intensities are **not HU-calibrated** (SPARE clinical convention). See [SPARE Challenge](https://image-x.sydney.edu.au/spare-challenge/) and Shieh et al., *Med Phys* 2019 for the original reference-reconstruction definition.
 
 ### 2.4 Coordinate system
 

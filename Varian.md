@@ -48,7 +48,7 @@ Verified on local SPARE copy (2026-07-01). See also `Participant_Datasets/Clinic
 | SID / SDD | **1000 / 1500 mm** | 1000 / 1536 mm | 1000 / 1500 mm |
 | Native recon size | **450×220×450** mm³ @ 1 mm | 270×256×270 @ 1 mm | 450×220×450 @ 1 mm |
 | Downsampled grid | **128³** (same pipeline) | 128³ | 128³ |
-| Ground truth | FDK full-scan reference (registration DVFs) | FDK full-scan reference | Simulated 4D-CT |
+| Ground truth | Binned FDK from oversampled projections (`GTVol_*`; see `Methods-Elekta.md` §2.3) | Same | Simulated 4D-CT |
 | Reference phase | **06** (max exhale, bin 6) | 06 | 06 |
 
 **Implication:** Varian clinical is **geometry-compatible with MC gold-batch defaults**, but **GT quality matches Elekta clinical** (noisy registration DVFs, not simulation). Do not mix `CV_*` and `CE_*` in one model without harmonization.
@@ -83,6 +83,8 @@ Evaluation/ClinicalVarianDatasets/
 ```
 
 Participant packs do **not** include `GTVol_*.mha`; merge Evaluation GT into staged tree (same pattern as Elekta).
+
+**FDK vs `GTVol` (same as Elekta):** `GTVol_01…10` = reference FDK per respiratory bin from the **full oversampled** scan. `FDKRecon/FDK4D_*` in Participant data = FDK from the **downsampled** 1-min projections (QC only; not our GT). On `T_01` training scans, `FDKGroundTruth/FDK4D_*` is byte-identical to Evaluation `GTVol_*`. This pipeline does **not** run FDK — see `Methods-Elekta.md` §2.3.
 
 ---
 
