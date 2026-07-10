@@ -26,6 +26,7 @@ if str(REPO) not in sys.path:
 
 from ml.utilities import networksFiLM, spatialTransform
 from ml.volume_view import VolumeViewConfig, extract_flow_uv, extract_slice
+from ml.mask_utils import apply_body_mask_slice, load_body_mask
 
 
 def _normalize(x: np.ndarray) -> np.ndarray:
@@ -214,6 +215,7 @@ def export_dvf_warp_mp4(
     max_frames: int = 0,
     view: VolumeViewConfig | None = None,
     ptv_mask: bool = False,
+    body_mask: bool = False,
 ) -> int:
     import imageio
 
@@ -245,6 +247,10 @@ def export_dvf_warp_mp4(
     if src_ptv_np is not None:
         print(f"PTV mask: {ptv_path} (voxels={int(src_ptv_np.sum())})")
 
+    body_mask_np = load_body_mask(test_dir / "Masks") if body_mask else None
+    if body_mask_np is not None:
+        print(f"Body mask: {int(body_mask_np.sum())} voxels (volume panels masked)")
+
     # Global display ranges
     all_src_p, all_tgt_p = [], []
     for s in samples[: min(32, len(samples))]:
@@ -274,6 +280,11 @@ def export_dvf_warp_mp4(
 
             src_slice = extract_slice(src_vol_np, view_cfg)
             warped_slice = extract_slice(_normalize(warped), view_cfg)
+            if body_mask_np is not None:
+                axis = int(view_cfg.slice_axis)
+                idx = view_cfg.clamp_slice(src_vol_np.shape)
+                src_slice = apply_body_mask_slice(src_slice, body_mask_np, axis, idx)
+                warped_slice = apply_body_mask_slice(warped_slice, body_mask_np, axis, idx)
             u, v = extract_flow_uv(flow_np, view_cfg)
 
             src_rgb = gray_to_rgb_u8(src_slice, v_lo, v_hi)
@@ -342,6 +353,11 @@ def main() -> int:
         action="store_true",
         help="Overlay warped PTV outline on warped volume panel (Mask_PTV_mha.npy)",
     )
+    ap.add_argument(
+        "--body-mask",
+        action="store_true",
+        help="Mask volume panels to body interior (Mask_Body_mha.npy)",
+    )
     args = ap.parse_args()
 
     view = VolumeViewConfig(scan_id=args.scan_id)
@@ -373,6 +389,7 @@ def main() -> int:
         max_frames=args.max_frames,
         view=view,
         ptv_mask=args.ptv_mask,
+        body_mask=args.body_mask,
     )
     print(f"Wrote {n} frames -> {out}")
     return 0

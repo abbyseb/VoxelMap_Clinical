@@ -30,6 +30,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from ml.dynamic_dataset import resolve_voxel_map_data_root
+from ml.mask_utils import load_body_mask, masked_volume_metrics
 from ml.training_config import REFERENCE_IM_SIZE
 from ml.utilities import losses, networksFiLM, spatialTransform
 
@@ -206,17 +207,9 @@ def main() -> int:
     if not source_vol_path.exists():
         source_vol_path = next((patient / "SourceVolumes").glob("sub_CT_*.npy"), None)
 
-    source_abdomen_path = patient / "Masks" / "sub_Abdomen_mha.npy"
-    if not source_abdomen_path.exists():
-        source_abdomen_path = next((patient / "Masks").glob("*Body*.npy"), None)
-
-    if source_abdomen_path and source_abdomen_path.exists():
-        abdomen_mask_np = _normalize(np.load(source_abdomen_path).squeeze())
-        while abdomen_mask_np.ndim > 3:
-            abdomen_mask_np = abdomen_mask_np.squeeze(0)
-        abdomen_mask_np = (abdomen_mask_np > 0).astype(np.float32)
-    else:
-        abdomen_mask_np = None
+    abdomen_mask_np = load_body_mask(patient / "Masks")
+    if abdomen_mask_np is not None:
+        print(f"  Body mask: {int(abdomen_mask_np.sum())} voxels (PSNR/SSIM masked)")
 
     src_vol_np = _normalize(np.load(source_vol_path).squeeze())
     while src_vol_np.ndim > 3:
@@ -283,29 +276,7 @@ def main() -> int:
 
             pred_vol_3d = transformer(src_vol_t, pred_flow)[0, 0].cpu().numpy()
             gt_vol_3d = transformer(src_vol_t, gt_flow)[0, 0].cpu().numpy()
-
-            if abdomen_mask_np is not None:
-                mask_bin = abdomen_mask_np > 0
-                mse_pred = pred_vol_3d[mask_bin]
-                mse_gt = gt_vol_3d[mask_bin]
-            else:
-                mse_pred = pred_vol_3d.flatten()
-                mse_gt = gt_vol_3d.flatten()
-
-            mse_val = float(np.mean((mse_pred - mse_gt) ** 2))
-
-            if HAS_SKIMAGE and _psnr is not None:
-                psnr_val = float(_psnr(mse_gt, mse_pred, data_range=1.0))
-            else:
-                psnr_val = float(10 * np.log10(1.0 / (mse_val + 1e-8)))
-
-            if HAS_SKIMAGE and _ssim is not None:
-                try:
-                    ssim_val = float(_ssim(gt_vol_3d, pred_vol_3d, data_range=1.0))
-                except Exception:
-                    ssim_val = float("nan")
-            else:
-                ssim_val = float("nan")
+            mse_val, psnr_val, ssim_val = masked_volume_metrics(gt_vol_3d, pred_vol_3d, abdomen_mask_np)
 
             try:
                 pf = pred_flow.detach().float().cpu().numpy()

@@ -19,10 +19,24 @@ SCAN_ID = os.environ.get("SPARE_SCAN_ID", "CE_P1_V_01")
 
 def load_acquired(path: Path) -> np.ndarray:
     data = np.fromfile(path, dtype=np.float32)
-    side = int(round(len(data) ** 0.5))
-    if side * side != len(data):
-        raise ValueError(f"{path.name}: unexpected size {len(data)}")
-    return data.reshape((side, side), order="F")
+    n = int(len(data))
+    # Elekta: 512x512. Varian: 1024x768 (P1/P2), 1006x750 acquired (P3-P5), 1008x752 DRR.
+    known_shapes = (
+        (512, 512),
+        (768, 1024),
+        (750, 1006),
+        (1006, 750),
+        (752, 1008),
+        (1008, 752),
+        (128, 128),
+    )
+    for h, w in known_shapes:
+        if h * w == n:
+            return data.reshape((h, w), order="F")
+    side = int(round(n ** 0.5))
+    if side * side == n:
+        return data.reshape((side, side), order="F")
+    raise ValueError(f"{path.name}: unexpected size {n}")
 
 
 def resize_to(img: np.ndarray, size: int) -> np.ndarray:
