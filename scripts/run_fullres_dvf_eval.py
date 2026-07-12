@@ -44,18 +44,30 @@ def _stratified_sample(index: list[dict], max_samples: int) -> list[dict]:
 
 
 def _resolve_native_paths(scan_id: str) -> tuple[Path, Path, Path | None]:
-    """Return (native_ct_06, native_ptv, native_body_or_None)."""
+    """Return (native_ct_06, native_ptv, native_body_or_None).
+
+    For ``*_fdk`` scans, prefer the FDK run/staged native CT and matching masks.
+    """
     pnum = scan_id.split("_P")[1].split("_")[0]
-    staged = REPO / "data" / "staged" / f"P{pnum}" / scan_id
+    source_id = scan_id[: -len("_fdk")] if scan_id.endswith("_fdk") else scan_id
     run_ct = REPO / "runs" / scan_id / scan_id / "train" / "CT_06.mha"
-    ct = run_ct if run_ct.is_file() else staged / "GTVol_06.mha"
-    ptv = staged / "Mask_PTV.mha"
-    body = staged / "Mask_Body.mha"
-    if not ct.is_file():
-        raise SystemExit(f"Native CT not found for {scan_id}: tried {run_ct} and {staged}/GTVol_06.mha")
-    if not ptv.is_file():
-        raise SystemExit(f"Native PTV mask not found: {ptv}")
-    return ct, ptv, body if body.is_file() else None
+    staged_fdk = REPO / "data" / "staged_fdk" / f"P{pnum}" / scan_id
+    staged = REPO / "data" / "staged" / f"P{pnum}" / source_id
+
+    ct_candidates = [
+        run_ct,
+        staged_fdk / "GTVol_06.mha",
+        staged / "GTVol_06.mha",
+    ]
+    ct = next((p for p in ct_candidates if p.is_file()), None)
+    mask_bases = [staged_fdk, staged]
+    ptv = next((b / "Mask_PTV.mha" for b in mask_bases if (b / "Mask_PTV.mha").is_file()), None)
+    body = next((b / "Mask_Body.mha" for b in mask_bases if (b / "Mask_Body.mha").is_file()), None)
+    if ct is None:
+        raise SystemExit(f"Native CT not found for {scan_id}: tried {ct_candidates}")
+    if ptv is None:
+        raise SystemExit(f"Native PTV mask not found for {scan_id}")
+    return ct, ptv, body
 
 
 def main() -> int:
@@ -64,17 +76,32 @@ def main() -> int:
     ap.add_argument("--gpu", type=int, default=0)
     ap.add_argument("--max-samples", type=int, default=90, help="0 = all samples")
     ap.add_argument("--device", default=None)
+    ap.add_argument(
+        "--no-film",
+        action="store_true",
+        help="Evaluate checkpoints_nofilm/best.pt → eval_fullres_nofilm/",
+    )
     args = ap.parse_args()
 
     scan_id = args.scan_id
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
-    ckpt = REPO / "runs" / scan_id / "checkpoints" / "best.pt"
+    if args.no_film:
+        ckpt = REPO / "runs" / scan_id / "checkpoints_nofilm" / "best.pt"
+        if not ckpt.is_file():
+            ckpt = REPO / "runs" / scan_id / "checkpoints_nofilm" / f"{scan_id}_concat_nofilm.pt"
+        out_dir = REPO / "runs" / scan_id / "eval_fullres_nofilm"
+        tag = "no-FiLM"
+    else:
+        ckpt = REPO / "runs" / scan_id / "checkpoints" / "best.pt"
+        if not ckpt.is_file():
+            ckpt = REPO / "runs" / scan_id / "checkpoints" / f"{scan_id}_concat_film.pt"
+        out_dir = REPO / "runs" / scan_id / "eval_fullres"
+        tag = "FiLM"
     if not ckpt.is_file():
-        ckpt = REPO / "runs" / scan_id / "checkpoints" / f"{scan_id}_concat_film.pt"
+        raise SystemExit(f"Checkpoint not found: {ckpt}")
     data = resolve_voxel_map_data_root(REPO / "runs" / scan_id / "ModelTraining" / "train" / scan_id)
-    out_dir = REPO / "runs" / scan_id / "eval_fullres"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     native_ct_path, native_ptv_path, native_body_path = _resolve_native_paths(scan_id)
@@ -87,8 +114,8 @@ def main() -> int:
     train_spacing = spacing_from_grids(native_size)
     native_spacing = (1.0, 1.0, 1.0)
 
-    print("--- Full-res DVF upsample eval (Phase 1) ---")
-    print(f"Scan:       {scan_id}")
+    print("--- Full-res DVF upsample eval ---")
+    print(f"Scan:       {scan_id}  ({tag})")
     print(f"Checkpoint: {ckpt}")
     print(f"Data:       {data}")
     print(f"Native CT:  {native_ct_path}  shape={native_size}")
@@ -97,11 +124,12 @@ def main() -> int:
 
     im_size = REFERENCE_IM_SIZE
     model = networksFiLM.Model.load(str(ckpt), str(device)).to(device).eval()
+    use_film = bool(getattr(model, "use_film", False))
     xf_128 = spatialTransform.Network([im_size] * 3).to(device).eval()
     xf_nat = spatialTransform.Network(list(native_size)).to(device).eval()
 
     index = _stratified_sample(build_train_index(data), args.max_samples)
-    print(f"Samples:    {len(index)}")
+    print(f"Samples:    {len(index)} | model.use_film={use_film}")
 
     # 128³ source tensors
     src_vol_path = data / "SourceVolumes" / "sub_CT_06_mha.npy"
@@ -138,7 +166,10 @@ def main() -> int:
             tgt_p = torch.from_numpy(_normalize(np.load(sample["target_proj"]))[None, None]).to(device)
             angle = torch.tensor([sample["angle"]], dtype=torch.float32, device=device)
 
-            _, pred_flow = model(src_p, tgt_p, src_vol_t, angle=angle)
+            if use_film:
+                _, pred_flow = model(src_p, tgt_p, src_vol_t, angle=angle)
+            else:
+                _, pred_flow = model(src_p, tgt_p, src_vol_t)
             gt_flow = _load_dvf_tensor(sample["gt_dvf"], device, im_size)
 
             # --- 128³ metrics ---
@@ -184,10 +215,13 @@ def main() -> int:
 
     summary = {
         "scan_id": scan_id,
+        "variant": tag,
+        "use_film": use_film,
         "n_samples": len(index),
         "native_size": list(native_size),
         "train_spacing_mm": list(train_spacing),
         "checkpoint": str(ckpt),
+        "native_ct": str(native_ct_path),
         "at_128": {
             "mean_dice": _mean(buckets["128"]["dice"]),
             "mean_3d_error_mm": _mean(buckets["128"]["err3d"]),
