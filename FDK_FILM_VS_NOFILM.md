@@ -109,20 +109,91 @@ Scale factors from 128³:
 | Elekta FDK | 270×256×270 | ≈ (2.11, 2.00, 2.11) |
 | Varian FDK | 450×220×450 | ≈ (3.52, 1.72, 3.52) |
 
-### Metrics
+### Metrics — definitions
 
-| Metric | Meaning | Better |
-|--------|---------|--------|
-| **Dice** | Overlap of PTV warped by predicted vs GT DVF | Higher |
-| **3D Error (mm)** | Mean PTV centroid displacement error | Lower |
-| **SSIM** | Structural similarity on warped CT (body-masked on sweep) | Higher |
-| **PSNR (dB)** | Peak signal-to-noise, body-masked on sweep | Higher |
+All reported values are **means over samples** (sweep projections or 90 stratified train-pairs). For each sample the model predicts a DVF; we warp the **source** PTV / CT with the **predicted** DVF and with the **GT** DVF, then compare those two warps (not raw CT vs warped CT).
+
+| Metric | Better | What it measures |
+|--------|--------|------------------|
+| **Dice** | Higher (→ 1) | Soft overlap of predicted-warped PTV vs GT-warped PTV |
+| **3D Error (mm)** | Lower (→ 0) | Euclidean mismatch of PTV centroid *shifts* (pred vs GT) |
+| **SSIM** | Higher (→ 1) | Structural similarity of warped CTs inside body mask |
+| **PSNR (dB)** | Higher | Peak signal-to-noise of warped CTs inside body mask |
+| **MSE** | Lower | Mean squared intensity error of warped CTs inside body (logged in JSON; not in summary tables) |
+| **GT shift consistency MAE (mm)** | Lower | Full-res sanity: how well upsampled GT DVF matches native GT warp centroid shift |
 
 **Δ convention throughout:** **No-FiLM − FiLM**  
 - Positive Dice / SSIM / PSNR → No-FiLM better  
 - Negative 3D error → No-FiLM better  
 
 For within-model upscale tables: **Δ = full-res − 128** (same sign convention per metric).
+
+#### Dice (PTV overlap)
+
+Soft Dice between the PTV mask warped by the **predicted** DVF and the same source PTV warped by the **GT** DVF (`losses.dice` in LEARN-GUI):
+
+\[
+\mathrm{Dice} = \frac{2\sum_i p_i\, g_i}{\sum_i p_i + \sum_i g_i}
+\]
+
+- \(p\) = predicted-warped PTV, \(g\) = GT-warped PTV (continuous after spatial transform).
+- Range ideally **0–1**; **1** = identical overlap.
+- Answers: “Does the predicted motion put the PTV where the GT motion puts it?”
+- Implementation: `ml/utilities/losses.py` → `class dice`.
+
+#### 3D Error (PTV centroid, mm)
+
+1. Compute LR / SI / AP **centroid shift** of the warped PTV relative to the **source** PTV, in mm (`centroid_shift_mm`, using voxel spacing).
+2. Do this for both predicted and GT warps → shifts \(\mathbf{s}_\mathrm{pred}\) and \(\mathbf{s}_\mathrm{GT}\).
+3. **3D Error** = \(\lVert \mathbf{s}_\mathrm{pred} - \mathbf{s}_\mathrm{GT} \rVert_2\) in mm.
+
+- Lower means the predicted motion moves the PTV center as far (and in the same direction) as the GT motion.
+- Sensitive to anisotropic spacing and residual interpolation when upscaling DVFs.
+- Axes: LR (left–right), SI (superior–inferior), AP (anterior–posterior).
+
+#### Body mask
+
+Image metrics (MSE / PSNR / SSIM) are restricted to voxels inside the patient **body / abdomen** mask (`ml/mask_utils.py`: `*Body*`, `*Abdomen*`). Air / couch outside the body is ignored so background zeros do not inflate scores.
+
+#### MSE (mean squared error)
+
+Over body voxels only:
+
+\[
+\mathrm{MSE} = \frac{1}{N}\sum_{i \in \mathrm{body}} (I^\mathrm{pred}_i - I^\mathrm{GT}_i)^2
+\]
+
+where \(I^\mathrm{pred}\) / \(I^\mathrm{GT}\) are CT volumes warped by predicted / GT DVFs (intensities typically normalized to ~[0, 1]). Stored as `mean_mse` in full-res JSONs.
+
+#### PSNR (peak signal-to-noise ratio, dB)
+
+On the same body-masked intensities (`skimage.metrics.peak_signal_noise_ratio`, `data_range=1.0`):
+
+\[
+\mathrm{PSNR} = 10\log_{10}\!\left(\frac{\mathrm{data\_range}^2}{\mathrm{MSE}}\right)
+\]
+
+with \(\mathrm{data\_range}=1\). Higher dB = closer warped images. Fallback if skimage missing: \(10\log_{10}(1/(\mathrm{MSE}+10^{-8}))\).
+
+#### SSIM (structural similarity index)
+
+Structural similarity between predicted-warped and GT-warped CT volumes (`skimage.metrics.structural_similarity`, `data_range=1.0`, **`mask=` body** when available).
+
+- Combines local luminance, contrast, and structure (windowed comparison).
+- Range typically **0–1** (can be slightly outside for edge cases); **1** = identical structure.
+- More perceptually aligned than MSE/PSNR alone; still secondary to Dice/3D for “did the target move correctly?”
+
+#### GT shift consistency MAE (full-res only)
+
+Sanity check that DVF upsampling + displacement scaling is in the right ballpark: compare the 3D centroid shift implied by the **upsampled GT DVF** on the native grid vs the same GT warp path @128 (reported as `gt_shift_consistency_mae_mm` in full-res JSONs). Typical values ~0.8–1.4 mm; large values would flag a scaling bug.
+
+#### What is *not* a primary table metric here
+
+| Item | Role |
+|------|------|
+| Jacobian / folding (`det(J)≤0`) | Used in some GTVol evals; **not** tabulated in this FiLM vs No-FiLM note |
+| Training loss | Optimization objective only; see per-run `loss_history.json` |
+| Projection-space SSIM/PSNR | Not used; all image metrics are **3D volume** after warp |
 
 ### How to reproduce
 
