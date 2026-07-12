@@ -228,6 +228,7 @@ def export_dvf_warp_mp4(
     dev = torch.device(device)
     model = networksFiLM.Model.load(str(checkpoint), str(dev))
     model = model.to(dev).eval()
+    use_film = bool(getattr(model, "use_film", False))
     transformer = spatialTransform.Network([128, 128, 128]).to(dev).eval()
 
     src_vol_path = test_dir / "SourceVolumes" / "sub_CT_06_mha.npy"
@@ -274,7 +275,10 @@ def export_dvf_warp_mp4(
             src_pt = torch.from_numpy(src_p[None, None]).float().to(dev)
             tgt_pt = torch.from_numpy(tgt_p[None, None]).float().to(dev)
 
-            _, pred_flow = model(src_pt, tgt_pt, src_vol_t, angle=angle)
+            if use_film:
+                _, pred_flow = model(src_pt, tgt_pt, src_vol_t, angle=angle)
+            else:
+                _, pred_flow = model(src_pt, tgt_pt, src_vol_t)
             warped = transformer(src_vol_t, pred_flow)[0, 0].cpu().numpy()
             flow_np = pred_flow[0].cpu().numpy()  # 3,D,H,W
 
@@ -358,6 +362,11 @@ def main() -> int:
         action="store_true",
         help="Mask volume panels to body interior (Mask_Body_mha.npy)",
     )
+    ap.add_argument(
+        "--no-film",
+        action="store_true",
+        help="Use checkpoints_nofilm/best.pt and *_nofilm.mp4 output names",
+    )
     args = ap.parse_args()
 
     view = VolumeViewConfig(scan_id=args.scan_id)
@@ -374,9 +383,32 @@ def main() -> int:
         view.flip_v = True
     view.resolve()
 
-    ckpt = args.checkpoint or (REPO / "runs" / args.scan_id / "checkpoints/best.pt")
+    tag = "_nofilm" if args.no_film else ""
+    if args.checkpoint:
+        ckpt = args.checkpoint
+    elif args.no_film:
+        ckpt = REPO / "runs" / args.scan_id / "checkpoints_nofilm/best.pt"
+    else:
+        ckpt = REPO / "runs" / args.scan_id / "checkpoints/best.pt"
     test_dir = args.test_dir or (REPO / "runs" / args.scan_id / "ModelTraining/test" / args.scan_id)
-    out = args.out or (REPO / "runs" / args.scan_id / "videos" / f"{args.scan_id}_dvf_warp_panels.mp4")
+    if args.out:
+        out = args.out
+    else:
+        suffix = "panels"
+        if args.plane and args.slice_index is not None:
+            bits = [args.plane + str(args.slice_index)]
+            if args.ptv_mask:
+                bits.append("ptv")
+            if args.body_mask:
+                bits.append("body")
+            suffix = "_".join(bits)
+        out = (
+            REPO
+            / "runs"
+            / args.scan_id
+            / "videos"
+            / f"{args.scan_id}_dvf_warp_{suffix}{tag}.mp4"
+        )
 
     n = export_dvf_warp_mp4(
         ckpt,

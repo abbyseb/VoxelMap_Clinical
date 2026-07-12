@@ -446,11 +446,15 @@ Related earlier GTVol pilot (not FDK): `FULLRES_DVF_UPSAMPLE.md` (CE_P1 / CV_P2)
 | Sweep No-FiLM | `results/<scan>_fdk/sweep_metrics_nofilm.json` |
 | Full-res FiLM | `results/<scan>_fdk/fullres_vs_128_metrics_film.json` |
 | Full-res No-FiLM | `results/<scan>_fdk/fullres_vs_128_metrics_nofilm.json` |
-| FiLM checkpoint | `runs/<scan>_fdk/checkpoints/best.pt` |
-| No-FiLM checkpoint | `runs/<scan>_fdk/checkpoints_nofilm/best.pt` |
+| No-FiLM plots (published) | `results/<scan>_fdk/plots_nofilm/` (loss curves, sweep traces) |
+| No-FiLM videos (published) | `results/<scan>_fdk/videos_nofilm/` (`*_nofilm.mp4` DVF warps) |
+| FiLM checkpoint | `runs/<scan>_fdk/checkpoints/best.pt` (**gitignored**; local only) |
+| No-FiLM checkpoint | `runs/<scan>_fdk/checkpoints_nofilm/best.pt` (**gitignored**; local only) |
 | DVF upsample helper | `ml/flow_utils.py` (`upsample_dvf`) |
 | Full-res eval script | `scripts/run_fullres_dvf_eval.py` (`--no-film` supported) |
 | Full-res FDK batch | `scripts/run_fdk_fullres_eval.sh` |
-| No-FiLM train / sweep batch | `scripts/run_fdk_nofilm_batch.sh`, `scripts/run_fdk_nofilm_eval.sh` |
+| No-FiLM train / sweep / export | `scripts/run_fdk_nofilm_batch.sh`, `run_fdk_nofilm_eval.sh`, `run_fdk_nofilm_exports.sh` |
 | GTVol Phase-1 upscale note | `FULLRES_DVF_UPSAMPLE.md` |
 | Experiment plan | `SUBSAMPLE_TRAIN_FULLRES_EVAL_PLAN.md` |
+
+**Note:** Model weights (`.pt`) are intentionally not in git (`runs/` and `*.pt` ignored). Loss curves and DVF warp MP4s for No-FiLM are published under `plots_nofilm/` and `videos_nofilm/` so they do not overwrite FiLM `plots/` / `videos/`.
