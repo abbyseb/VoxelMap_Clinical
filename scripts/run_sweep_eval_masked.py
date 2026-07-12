@@ -19,6 +19,11 @@ def main() -> int:
     ap.add_argument("--gpu", type=int, default=0)
     ap.add_argument("--skip-video", action="store_true")
     ap.add_argument(
+        "--no-film",
+        action="store_true",
+        help="Evaluate no-FiLM checkpoint under checkpoints_nofilm/ → eval_sweep_nofilm/",
+    )
+    ap.add_argument(
         "--export-only",
         action="store_true",
         help="Skip sweep eval; only run video exports (for already-evaluated runs).",
@@ -26,10 +31,15 @@ def main() -> int:
     args = ap.parse_args()
 
     scan_id = args.scan_id
-    ckpt = REPO / "runs" / scan_id / "checkpoints" / "best.pt"
+    if args.no_film:
+        ckpt = REPO / "runs" / scan_id / "checkpoints_nofilm" / "best.pt"
+        out = REPO / "runs" / scan_id / "eval_sweep_nofilm"
+        log = REPO / "runs" / scan_id / "logs/phase4_sweep_eval_nofilm.log"
+    else:
+        ckpt = REPO / "runs" / scan_id / "checkpoints" / "best.pt"
+        out = REPO / "runs" / scan_id / "eval_sweep"
+        log = REPO / "runs" / scan_id / "logs/phase4_sweep_eval.log"
     data = REPO / "runs" / scan_id / "ModelTraining/test" / scan_id
-    out = REPO / "runs" / scan_id / "eval_sweep"
-    log = REPO / "runs" / scan_id / "logs/phase4_sweep_eval.log"
 
     if not ckpt.is_file():
         raise SystemExit(f"Checkpoint not found: {ckpt}")
@@ -54,10 +64,11 @@ def main() -> int:
         str(out),
         "--scan-id",
         scan_id,
-        "--use_film",
         "--device",
         "cuda",
     ]
+    if not args.no_film:
+        cmd.append("--use_film")
 
     if not args.export_only:
         out.mkdir(parents=True, exist_ok=True)

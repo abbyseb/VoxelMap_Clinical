@@ -25,13 +25,18 @@ def default_device() -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Run VoxelMap concatenated+FiLM training")
+    ap = argparse.ArgumentParser(description="Run VoxelMap concatenated training (+ optional FiLM)")
     ap.add_argument("--scan-id", default=SCAN_ID)
     ap.add_argument("--epochs", type=int, default=50)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--device", default=None, help="cuda | cpu (default: cuda if available)")
     ap.add_argument("--num-workers", type=int, default=4)
     ap.add_argument("--gpu", type=int, default=0, help="CUDA device index (sets CUDA_VISIBLE_DEVICES)")
+    ap.add_argument(
+        "--no-film",
+        action="store_true",
+        help="Train without FiLM; writes checkpoints_nofilm/ and {scan}_concat_nofilm.pt",
+    )
     args = ap.parse_args()
 
     device = args.device or default_device()
@@ -39,10 +44,17 @@ def main() -> int:
         device = "cuda:0"
 
     data = REPO / "runs" / args.scan_id / "ModelTraining/train" / args.scan_id
-    ckpt_dir = REPO / "runs" / args.scan_id / "checkpoints"
-    plots_dir = REPO / "runs" / args.scan_id / "plots"
-    final_ckpt = ckpt_dir / f"{args.scan_id}_concat_film.pt"
-    log = REPO / "runs" / args.scan_id / "logs/phase3_train.log"
+    run_root = REPO / "runs" / args.scan_id
+    if args.no_film:
+        ckpt_dir = run_root / "checkpoints_nofilm"
+        plots_dir = run_root / "plots_nofilm"
+        final_ckpt = ckpt_dir / f"{args.scan_id}_concat_nofilm.pt"
+        log = run_root / "logs/phase3_train_nofilm.log"
+    else:
+        ckpt_dir = run_root / "checkpoints"
+        plots_dir = run_root / "plots"
+        final_ckpt = ckpt_dir / f"{args.scan_id}_concat_film.pt"
+        log = run_root / "logs/phase3_train.log"
 
     if not data.is_dir():
         raise SystemExit(f"ModelTraining not found: {data}\nRun phase 2 or rsync runs/ from T7.")
@@ -62,7 +74,6 @@ def main() -> int:
         str(data),
         "--architecture",
         "concatenated",
-        "--use_film",
         "--epochs",
         str(args.epochs),
         "--batch_size",
@@ -82,6 +93,10 @@ def main() -> int:
         "--save_path",
         str(final_ckpt),
     ]
+    if not args.no_film:
+        # Insert after architecture so trainer gets FiLM on.
+        arch_idx = cmd.index("concatenated")
+        cmd.insert(arch_idx + 1, "--use_film")
 
     print("VOXELMAP_CLINICAL_ROOT:", REPO)
     print("LEARN_GUI_ROOT:", LEARN)
