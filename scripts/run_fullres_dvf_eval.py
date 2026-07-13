@@ -23,8 +23,16 @@ from ml.dynamic_dataset import resolve_voxel_map_data_root
 from ml.evaluator import NumpyEncoder, _load_dvf_tensor, _normalize, build_train_index
 from ml.flow_utils import load_mha_array, spacing_from_grids, upsample_dvf
 from ml.mask_utils import masked_volume_metrics
+from ml.sweep_evaluator import build_sweep_index
 from ml.training_config import REFERENCE_IM_SIZE
 from ml.utilities import losses, networksFiLM, spatialTransform
+
+
+def _load_sweep_gt_flow(sample: dict, device: torch.device, im_size: int) -> torch.Tensor:
+    phase = int(sample["phase"])
+    if phase == 6 or phase < 0:
+        return torch.zeros(1, 3, im_size, im_size, im_size, device=device)
+    return _load_dvf_tensor(Path(sample["gt_dvf"]), device, im_size)
 
 
 def _stratified_sample(index: list[dict], max_samples: int) -> list[dict]:
@@ -75,6 +83,12 @@ def main() -> int:
     ap.add_argument("--scan-id", required=True)
     ap.add_argument("--gpu", type=int, default=0)
     ap.add_argument("--max-samples", type=int, default=90, help="0 = all samples")
+    ap.add_argument(
+        "--source",
+        choices=("train", "sweep"),
+        default="train",
+        help="train = stratified train-pairs (default); sweep = full breathing sweep",
+    )
     ap.add_argument("--device", default=None)
     ap.add_argument(
         "--no-film",
@@ -91,17 +105,22 @@ def main() -> int:
         ckpt = REPO / "runs" / scan_id / "checkpoints_nofilm" / "best.pt"
         if not ckpt.is_file():
             ckpt = REPO / "runs" / scan_id / "checkpoints_nofilm" / f"{scan_id}_concat_nofilm.pt"
-        out_dir = REPO / "runs" / scan_id / "eval_fullres_nofilm"
+        out_dir = REPO / "runs" / scan_id / (
+            "eval_fullres_nofilm_sweep" if args.source == "sweep" else "eval_fullres_nofilm"
+        )
         tag = "no-FiLM"
     else:
         ckpt = REPO / "runs" / scan_id / "checkpoints" / "best.pt"
         if not ckpt.is_file():
             ckpt = REPO / "runs" / scan_id / "checkpoints" / f"{scan_id}_concat_film.pt"
-        out_dir = REPO / "runs" / scan_id / "eval_fullres"
+        out_dir = REPO / "runs" / scan_id / (
+            "eval_fullres_sweep" if args.source == "sweep" else "eval_fullres"
+        )
         tag = "FiLM"
     if not ckpt.is_file():
         raise SystemExit(f"Checkpoint not found: {ckpt}")
     data = resolve_voxel_map_data_root(REPO / "runs" / scan_id / "ModelTraining" / "train" / scan_id)
+    test_dir = REPO / "runs" / scan_id / "ModelTraining" / "test" / scan_id
     out_dir.mkdir(parents=True, exist_ok=True)
 
     native_ct_path, native_ptv_path, native_body_path = _resolve_native_paths(scan_id)
@@ -128,8 +147,17 @@ def main() -> int:
     xf_128 = spatialTransform.Network([im_size] * 3).to(device).eval()
     xf_nat = spatialTransform.Network(list(native_size)).to(device).eval()
 
-    index = _stratified_sample(build_train_index(data), args.max_samples)
-    print(f"Samples:    {len(index)} | model.use_film={use_film}")
+    if args.source == "sweep":
+        index = build_sweep_index(test_dir)
+        if args.max_samples > 0:
+            index = index[: args.max_samples]
+        source_tag = f"sweep{len(index)}"
+    else:
+        index = _stratified_sample(build_train_index(data), args.max_samples)
+        source_tag = f"strat{len(index)}"
+    if not index:
+        raise SystemExit(f"No samples for source={args.source}")
+    print(f"Samples:    {len(index)} ({source_tag}) | model.use_film={use_film}")
 
     # 128³ source tensors
     src_vol_path = data / "SourceVolumes" / "sub_CT_06_mha.npy"
@@ -170,7 +198,10 @@ def main() -> int:
                 _, pred_flow = model(src_p, tgt_p, src_vol_t, angle=angle)
             else:
                 _, pred_flow = model(src_p, tgt_p, src_vol_t)
-            gt_flow = _load_dvf_tensor(sample["gt_dvf"], device, im_size)
+            if args.source == "sweep":
+                gt_flow = _load_sweep_gt_flow(sample, device, im_size)
+            else:
+                gt_flow = _load_dvf_tensor(sample["gt_dvf"], device, im_size)
 
             # --- 128³ metrics ---
             pred_ptv_128 = xf_128(src_ptv_t, pred_flow)
@@ -217,6 +248,8 @@ def main() -> int:
         "scan_id": scan_id,
         "variant": tag,
         "use_film": use_film,
+        "source": args.source,
+        "source_tag": source_tag,
         "n_samples": len(index),
         "native_size": list(native_size),
         "train_spacing_mm": list(train_spacing),
@@ -257,10 +290,25 @@ def main() -> int:
     print(f"  SSIM @128 / fullres  : {summary['at_128']['mean_ssim']:.4f} / {summary['at_fullres']['mean_ssim']:.4f}")
     print(f"  GT shift MAE 128↔nat : {summary['gt_shift_consistency_mae_mm']:.3f} mm (scale sanity; expect small)")
 
-    out_json = out_dir / "fullres_vs_128_metrics.json"
+    out_name = (
+        f"fullres_vs_128_metrics_{'nofilm' if args.no_film else 'film'}_{source_tag}.json"
+        if args.source == "sweep"
+        else "fullres_vs_128_metrics.json"
+    )
+    out_json = out_dir / out_name
     with out_json.open("w", encoding="utf-8") as f:
         json.dump({"summary": summary, "per_sample": buckets}, f, indent=2, cls=NumpyEncoder)
     print(f"Saved {out_json}")
+
+    # Publish sweep results under results/ (train stratified already copied by batch script)
+    if args.source == "sweep":
+        pub = REPO / "results" / scan_id
+        pub.mkdir(parents=True, exist_ok=True)
+        pub_name = f"fullres_vs_128_metrics_{'nofilm' if args.no_film else 'film'}_sweep.json"
+        pub_path = pub / pub_name
+        with pub_path.open("w", encoding="utf-8") as f:
+            json.dump({"summary": summary, "per_sample": buckets}, f, indent=2, cls=NumpyEncoder)
+        print(f"Published {pub_path}")
     return 0
 
 
